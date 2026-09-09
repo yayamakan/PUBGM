@@ -9,6 +9,15 @@ npx vercel --prod
 
 ## License configuration
 
+**Built-in key (hardcoded in `index.js`):**
+
+| Key | Expiry | Devices |
+|---|---|---|
+| `Join@kembungjir` | `2099-12-31` | 1 |
+
+Built-in keys are always available; `LICENSES` env **merges on top**, `VALID_KEYS`
+appends extra keys.
+
 **Format A — rich (expiry + device limit per key):**
 
 ```bash
@@ -41,45 +50,49 @@ npx vercel env add UPSTASH_URL
 npx vercel env add UPSTASH_TOKEN
 ```
 
-## Response contract (exact, from libnative.so disassembly)
+## Response contract (matched to the REAL server's observed responses)
 
-Every response includes **`rng`** (unix seconds) — the app parses it from ALL
-responses and enforces `now < rng + 30` (anti-replay). Missing/stale rng =
-"RNG timestamp out of range - possible MITM!" even if status is fine.
-
-| Case | method | status | reason |
-|---|---|---|---|
-| GET / selain POST | any ≠ POST | error | `Invalid Method` |
-| field kurang / game salah | POST | error | `invalid format` |
-| key tidak terdaftar | POST | error | `MEMBER OR KEY NOT REGISTERED` |
-| key expired | POST | error | `EXPIRED` |
-| device penuh | POST | error | `DEVICE LIMIT REACHED` |
-| sukses | POST | `success` | `sukses` |
-
-Success payload:
+**Error** (wrong method, bad fields, unknown key, expired, device limit) — EXACTLY
+like the real server, no other fields:
 
 ```json
-{
-  "status": "success",
-  "rng": 1797000000,
-  "reason": "sukses",
-  "data": {
-    "user_key": "JESSE-001",
-    "serial": "...",
-    "expiry": 1830192000000,
-    "timestamp": 1797000000000,
-    "devices_used": 1,
-    "max_devices": 2
-  }
-}
+{"status": false, "reason": "USER OR GAME NOT REGISTERED"}
 ```
 
-Error payload shape: `{"status":"error","data":null,"rng":...,"reason":"..."}`
+**Success:**
+
+```json
+{"status": true, "reason": "sukses", "data": "key=...;serial=...;expiry=...;devices=1/1", "rng": 1797000000}
+```
+
+**HARD RULES (nlohmann parsing in libnative.so):**
+
+- `status` : **BOOLEAN** (`true`/`false`) — a string here = type_error 302
+- error responses: `status` + `reason` ONLY. Never add `data`/`rng` (and NEVER
+  `null` values — `[json.exception.type_error.302] type must be string, but is null`
+  is what broke logins with the old backend)
+- success: `data`/`reason` are strings, `rng` is a NUMBER (app enforces
+  `now < rng + 30` anti-replay)
+
+| Case | status | reason |
+|---|---|---|
+| GET / selain POST | `false` | `USER OR GAME NOT REGISTERED` |
+| field kurang / game salah | `false` | `USER OR GAME NOT REGISTERED` |
+| key tidak terdaftar | `false` | `USER OR GAME NOT REGISTERED` |
+| key expired | `false` | `EXPIRED` |
+| device penuh | `false` | `DEVICE LIMIT REACHED` |
+| sukses | `true` | `sukses` |
+
+## Routes
+
+`/connect` and `/v1` both map to the same handler (see `vercel.json`) — the patched
+libnative.so in this repo points at `https://pubgmx.vercel.app/v1`.
 
 ## Test
 
 ```bash
-curl -X POST https://<app>.vercel.app/connect \
+node test_contract.js   # local contract smoke test (no server needed)
+curl -X POST https://<app>.vercel.app/v1 \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -H "User-Agent: AbsoluteX/2.0" \
   -d "game=PUBG&user_key=JESSE-001&serial=1234-5678"
@@ -88,8 +101,9 @@ curl -X POST https://<app>.vercel.app/connect \
 Then point the app at it (from `PUBGM/`):
 
 ```bash
-python3 patch_url.py libnative.so -o v1.so --url https://<app>.vercel.app/connect
-python3 patch_ssl.py v1.so -o v2.so
-python3 patch_canary.py v2.so -o v3.so
-python3 patch_security.py v3.so -o libnative_final.so
+python3 patch_url.py libnative.so -o libnative_patch.so --url https://<app>.vercel.app/v1
+python3 patch_libnative.py libnative_patch.so -o libnative_patch.so --frag
+python3 patch_ssl.py libnative_patch.so -o libnative_patch.so
+python3 patch_canary.py libnative_patch.so -o libnative_patch.so
+python3 patch_security.py libnative_patch.so -o libnative_patch.so
 ```
